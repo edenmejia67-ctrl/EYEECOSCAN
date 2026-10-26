@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EcoEye Scan - 3D Simulator</title>
+<style>
+:root{--bg:#e9eef3;--pn:#fbfcfd;--tx:#1b2430;--mu:#5b6877;--ln:#cdd6df;--ac:#0f766e;--bar:#dfe6ec}
+@media(prefers-color-scheme:dark){:root{--bg:#11161c;--pn:#1a222b;--tx:#e6edf3;--mu:#93a1b0;--ln:#2b3642;--ac:#2dd4bf;--bar:#26313c}}
+*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--tx);font:13px/1.45 system-ui,sans-serif}
+canvas{position:fixed;inset:0;display:block;cursor:grab}
+#p{position:fixed;top:0;right:0;bottom:0;width:min(340px,42vw);overflow:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
+.c{background:var(--pn);border:1px solid var(--ln);border-radius:8px;padding:9px 10px}
+h1{font-size:15px;margin:0 0 3px}h2{font-size:12px;margin:0 0 6px;color:var(--mu);font-weight:600}
+#it{color:var(--mu)}#it b{color:var(--tx)}
+.r{display:flex;gap:6px;align-items:center;margin:4px 0;flex-wrap:wrap}
+button,select{font:inherit;color:var(--tx);background:var(--bar);border:1px solid var(--ln);border-radius:5px;padding:4px 9px;cursor:pointer}
+button.m{background:var(--ac);color:#04201d;border-color:transparent;font-weight:700}
+button:disabled{opacity:.45;cursor:default}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--ac);outline-offset:1px}
+input[type=range]{flex:1;min-width:80px}
+#res{color:var(--mu);min-height:18px}
+.b{display:flex;align-items:center;gap:6px;margin:3px 0}.b i{flex:0 0 52px;font-style:normal}
+.b u{flex:1;height:8px;background:var(--bar);border-radius:4px;overflow:hidden}.b u s{display:block;height:100%}
+.b span{flex:0 0 40px;text-align:right;color:var(--mu)}
+#sm{margin:0;height:130px;overflow:auto;font:11px/1.4 ui-monospace,monospace;background:#0b1015;color:#7ee0b8;padding:6px;border-radius:5px;white-space:pre-wrap}
+table{width:100%;border-collapse:collapse}td{padding:1px 0}td+td{text-align:right;font-weight:600}
+@media(max-width:700px){#p{width:48vw}}
+</style></head><body>
+<aside id="p">
+<div class="c"><h1>EcoEye Scan</h1><div id="it">Click any part in the 3D view to see what it does.</div></div>
+<div class="c"><h2>Controls</h2>
+<div class="r"><button class="m" id="go">Randomize</button><button class="m" id="put">Put in bin (hand)</button></div>
+<div id="res">Starting self-test...</div>
+<div class="r"><label><input type="checkbox" id="auto"> Auto mode</label><label><input type="checkbox" id="cov"> Cover on</label>
+<select id="q" aria-label="Quality"><option value="hi">High quality</option><option value="lo">Low quality</option></select></div>
+<div class="r">Misclassify <input type="range" id="mis" min="0" max="40" value="8"><b id="mv">8%</b></div>
+<div class="r"><label><input type="checkbox" id="low"> Low battery (3.2 V)</label></div>
+<div class="r">Stuck servo <select id="stk"><option value="0">None</option><option value="1">1 Wet</option><option value="2">2 Dry</option><option value="3">3 Metal</option><option value="4">4 Plastic</option></select></div>
+<div class="r"><button id="rs">Empty bins and reset</button><button id="csv">Export CSV</button></div></div>
+<div class="c"><h2>Results</h2><table id="st"></table><div id="bins"></div></div>
+<div class="c"><h2>Serial monitor (115200)</h2><pre id="sm"></pre></div>
+</aside>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const $=id=>document.getElementById(id),dark=matchMedia('(prefers-color-scheme: dark)').matches;
+const CL=['Wet','Dry','Metal','Plastic'],CC=[0x2563eb,0xeab308,0xdc2626,0x16a34a],HX=['#3b82f6','#eab308','#ef4444','#22c55e'];
+const IT=['Apple core','Paper ball','Tin can','Plastic bottle'],BX=[-5.7,-1.9,1.9,5.7],PIN=[12,13,14,15],FULL=12;
+const R=new THREE.WebGLRenderer({antialias:true});R.shadowMap.enabled=true;R.shadowMap.type=THREE.PCFSoftShadowMap;R.toneMapping=THREE.ACESFilmicToneMapping;R.toneMappingExposure=1.15;document.body.prepend(R.domElement);
+const scene=new THREE.Scene();scene.background=new THREE.Color(dark?0x0f141a:0xdde5ec);scene.fog=new THREE.Fog(dark?0x0f141a:0xdde5ec,60,120);
+const cam=new THREE.PerspectiveCamera(38,1,.1,200),cam2=new THREE.PerspectiveCamera(30,4/3,.1,100);
+cam2.position.set(0,10.5,-3.4);cam2.lookAt(0,.6,6);
+scene.add(new THREE.HemisphereLight(0xffffff,0x778899,.9));
+const dl=new THREE.DirectionalLight(0xffffff,1.1);dl.position.set(10,24,14);dl.castShadow=true;dl.shadow.bias=-.0004;
+Object.assign(dl.shadow.camera,{left:-20,right:20,top:20,bottom:-20,far:80});scene.add(dl);
+const lg=new THREE.Group();scene.add(lg);const pk=[];
+const M=(c,o={})=>new THREE.MeshStandardMaterial(Object.assign({color:c,roughness:.55,metalness:.1},o));
+const put=(o,x,y,z,p)=>{o.position.set(x,y,z);o.castShadow=o.receiveShadow=true;(p||scene).add(o);return o};
+const box=(w,h,d,m,x,y,z,p)=>put(new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m),x,y,z,p);
+const cyl=(r,h,m,x,y,z,p)=>put(new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,28),m),x,y,z,p);
+const V=(x,y,z)=>new THREE.Vector3(x,y,z),ease=u=>{u=Math.max(0,Math.min(1,u));return u*u*(3-2*u)};
+function G(id,fx,fy,fz){const g=new THREE.Group();g.userData={id,f:V(fx,fy,fz)};scene.add(g);pk.push(g);return g}
+function cv(w,h){const c=document.createElement('canvas');c.width=w;c.height=h;return c}
+function lab(t,x,y,z,s,bg){const c=cv(256,64),g=c.getContext('2d');g.fillStyle=bg||'rgba(15,20,26,.85)';g.fillRect(0,0,256,64);g.fillStyle='#fff';g.font='bold 30px system-ui,sans-serif';g.textAlign='center';g.textBaseline='middle';g.fillText(t,128,34);
+const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c)}));sp.position.set(x,y,z);sp.scale.set(2.4*s,.6*s,1);lg.add(sp)}
+function wood(){const c=cv(256,256),g=c.getContext('2d');g.fillStyle='#d9b98a';g.fillRect(0,0,256,256);for(let i=0;i<80;i++){g.strokeStyle=`rgba(120,80,40,${Math.random()*.2})`;g.lineWidth=Math.random()*2+.5;const y=Math.random()*256;g.beginPath();g.moveTo(0,y);g.bezierCurveTo(80,y+Math.random()*8-4,170,y+Math.random()*8-4,256,y);g.stroke()}
+const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.repeat.set(5,6);t.anisotropy=8;return t}
+const INFO={};
+// deck + scan pad
+box(22,.5,25,M(0xffffff,{map:wood(),roughness:.8}),0,-.25,-3);
+const gp=G('pad',0,.5,6);cyl(2,.12,M(0x161c22,{roughness:.9}),0,.06,6,gp);const ring=put(new THREE.Mesh(new THREE.TorusGeometry(2,.07,8,48),M(0x22c55e,{emissive:0x22c55e,emissiveIntensity:.15})),0,.14,6,gp);ring.rotation.x=Math.PI/2;
+lab('SCAN AREA',0,.9,8.4,.8);INFO.pad='Scan area: the one spot in front of the camera where each object is placed. The ring glows while the camera scans.';
+// bins + servos
+const piv=[];
+BX.forEach((x,i)=>{const g=G('b'+i,x,2,0),n=CL[i];
+box(3.4,3,4,M(CC[i],{roughness:.35}),x,1.5,0,g);box(3.7,.25,4.3,M(CC[i],{roughness:.35}),x,2.9,0,g);
+const c=cv(256,96),k=c.getContext('2d');k.fillStyle='#fff';k.fillRect(0,0,256,96);k.fillStyle='#111';k.font='bold 40px system-ui';k.textAlign='center';k.textBaseline='middle';k.fillText(n.toUpperCase(),128,50);
+g.add(put(new THREE.Mesh(new THREE.PlaneGeometry(2.4,.9),new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(c)})),x,1.4,2.02));
+const pv=new THREE.Group();pv.position.set(x,3.15,-2.1);g.add(pv);box(3.5,.18,4.1,M(0x16191d,{roughness:.2,metalness:.35}),0,0,2.05,pv);box(1,.2,.3,M(CC[i]),0,.15,3.9,pv);piv.push(pv);
+INFO['b'+i]=`${n} bin. The scan decides this item is ${n.toLowerCase()} waste, so servo ${i+1} lifts this lid. Only one lid opens at a time. A bin shows FULL at ${FULL} items and its lid stays locked.`;
+const s=G('s'+i,x,3,-3);box(1.2,.9,.8,M(0x1e3a8a),x,3.1,-2.6,s);cyl(.25,.3,M(0xf1f1f1),x,3.1,-2.15,s).rotation.z=Math.PI/2;
+lab(`S${i+1} GPIO${PIN[i]}`,x,4.5,-3,.6);
+INFO['s'+i]=`Servo ${i+1} (180 degree micro servo) turns the ${n} lid directly. Signal comes from GPIO${PIN[i]}. Power comes only from the 5 V boost rail, and its GND joins the common GND. It detaches after the lid closes to stop jitter.`});
+// mast + ESP32-CAM
+const ge=G('esp',0,10,-4);cyl(.18,10.5,M(0x444c55),0,5.25,-4.2,ge);const eb=box(2.4,.3,1.6,M(0x15191e),0,10.4,-3.9,ge);eb.rotation.x=.75;
+box(.6,.6,.5,M(0xdddddd),0,10.1,-3.4,ge).rotation.x=.75;
+const led=put(new THREE.Mesh(new THREE.SphereGeometry(.12,10,8),M(0xffffff,{emissive:0xffffaa,emissiveIntensity:0})),.8,10.6,-4.1,ge);
+lab('ESP32-CAM',0,11.7,-4,.8);
+INFO.esp='ESP32-CAM: the camera and the brain. The image goes to the laptop; GPIO12, 13, 14 and 15 drive the four servos. The white flash LED (GPIO4) turns on while scanning. TTL: TX to U0R, RX to U0T, GPIO0 to GND only while uploading. GPIO12 is a boot strapping pin, so the servo signal must not pull it HIGH at boot.';
+// breadboard + parts
+const gb=G('bb',0,.5,-6.4);box(8,.5,3,M(0xf1f1ec),0,.25,-6.4,gb);lab('Breadboard',0,1.4,-8,.7);
+INFO.bb='Breadboard: joins the four signal wires, the 5 V rail and the common GND between the ESP32-CAM and the servos.';
+const gt=G('ttl',-6.5,.3,-6.4);box(1.8,.3,1,M(0x0a7a3c),-6.5,.2,-6.4,gt);lab('TTL module',-6.5,1.2,-6.4,.8);
+INFO.ttl='USB-to-serial module. Its Type-C cable goes to the laptop and also powers the ESP32-CAM. TX to U0R, RX to U0T, 5V and GND to the ESP32-CAM.';
+const gc=G('boost',4.8,.5,-6.4);box(1.6,.8,1.1,M(0x1e6fd6),4.8,.4,-6.4,gc);lab('5V boost',4.8,1.4,-6.4,.7);
+INFO.boost='Step-up converter: raises the 3.7 V battery to a steady 5 V for the servos. The servos never draw power from the ESP32 pins.';
+const gk=G('cap',2.2,.8,-6.9);cyl(.22,.8,M(0x1d1d1d),2.2,.9,-6.9,gk);lab('470 uF',2.2,1.7,-6.9,.6);
+INFO.cap='470 uF capacitor across the servo 5 V and GND. It absorbs the current spike when a servo starts, which prevents resets and jitter.';
+const gy=G('batt',7.5,.5,-5.6);box(3.6,.9,1.2,M(0x333a42),7.5,.45,-5.6,gy);[7,8].forEach(x=>cyl(.35,1.8,M(0x2a9d8f),x,.9,-5.6,gy).rotation.z=Math.PI/2);lab('2x 3.7V parallel',7.5,1.9,-5.6,.9);
+INFO.batt='Two 3.7 V cells in parallel: same voltage, double the capacity. They feed only the boost converter and the servos.';
+// laptop
+const gl=G('lap',0,5,-13);box(8.4,.3,5.5,M(0xb8c0c8,{metalness:.6,roughness:.35}),0,.15,-11.5,gl);box(6.6,.05,2.2,M(0x2a3038),0,.33,-11,gl);
+const sc=new THREE.Group();sc.position.set(0,.3,-14.2);sc.rotation.x=-.25;gl.add(sc);box(8.4,5.3,.2,M(0x14181d,{metalness:.4}),0,2.65,0,sc);
+const rt=new THREE.WebGLRenderTarget(960,720),O=cv(800,600),og=O.getContext('2d'),ot=new THREE.CanvasTexture(O);
+const scrM=new THREE.Mesh(new THREE.PlaneGeometry(6.8,5.1),new THREE.MeshBasicMaterial({map:rt.texture,toneMapped:false}));scrM.position.set(0,2.7,.11);sc.add(scrM);
+const so=new THREE.Mesh(new THREE.PlaneGeometry(6.8,5.1),new THREE.MeshBasicMaterial({map:ot,transparent:true,toneMapped:false}));so.position.set(0,2.7,.12);sc.add(so);
+INFO.lap='Laptop running EcoEye Scan. Its screen shows the live ESP32-CAM image with a bounding box, the class and the confidence. It also powers the ESP32-CAM through the Type-C cable and TTL module.';
+// wires
+const wg=G('wires',0,2,-5),SG=[0xf59e0b,0x60a5fa,0xe879f9,0xfacc15],bp=[-2.7,-.9,.9,2.7];
+function W(a,b,c,l){const m=a.clone().add(b).multiplyScalar(.5);m.y+=l;wg.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.QuadraticBezierCurve3(a,m,b),24,.05,6),new THREE.MeshBasicMaterial({color:c})))}
+BX.forEach((x,i)=>{W(V(-.9+i*.6,10.1,-4.4),V(bp[i],.6,-5.8),SG[i],.6);W(V(bp[i],.6,-5.8),V(x-.3,3,-3.1),SG[i],1);
+W(V(4.8,.9,-6.4),V(x,3,-3.1),0xef4444,1.2+i*.2);W(V(3.6,.6,-7),V(x+.3,3,-3.1),0x222222,1.4+i*.2)});
+W(V(1,10.1,-4.4),V(.6,.6,-5.8),0x222222,.5);W(V(7,1.2,-5.6),V(4.8,.9,-6.4),0xef4444,1);W(V(8,1.2,-5.6),V(3.6,.6,-7),0x222222,1);
+[[0xef4444,-1],[0x222222,-.5],[0x38bdf8,0],[0x4ade80,.5]].forEach(([c,o])=>W(V(-6.5+o*.3,.4,-6.4),V(o*.4,10.1,-4.4),c,2.5+o));
+W(V(-7.4,.4,-6.4),V(-3.8,.4,-10.6),0x38bdf8,.8);
+INFO.wires='Wires. Orange, blue, pink and yellow: servo signals from GPIO12 to 15. Red: 5 V from the boost converter to the servos. Black: common GND (battery, boost, servos, ESP32-CAM, TTL, laptop). Thin blue and green to the TTL: TX and RX. The long blue cable is the Type-C line to the laptop.';
+const cover=box(19,2.8,5.8,M(0x1f2933,{transparent:true,opacity:.92}),0,1.4,-5.9);cover.castShadow=false;cover.visible=false;
+// hand
+const H=new THREE.Group(),hs=new THREE.Group(),hg=new THREE.Group();H.add(hs,hg);scene.add(H);H.visible=false;
+function hnd(g,c,gem){const m=M(c,{roughness:.5,metalness:gem?.8:.05});box(1.2,.35,1.3,m,0,0,0,g);for(let i=0;i<4;i++)box(.24,.25,1,m,-.45+i*.3,0,-1.1,g);box(.3,.25,.8,m,.75,0,-.4,g).rotation.y=-.6;box(1,.55,5,m,0,.1,3.2,g);
+if(gem)[0x9333ea,0x2563eb,0xdc2626,0xf97316,0x16a34a,0xfacc15].forEach((c,i)=>put(new THREE.Mesh(new THREE.SphereGeometry(.13,10,8),M(c,{emissive:c,emissiveIntensity:.8})),-.42+(i%3)*.42,.3,-.2+Math.floor(i/3)*.45,g))}
+hnd(hs,0xe0ac8a,0);hnd(hg,0xd4a017,1);
+// orbit / pick
+const sp={r:34,th:.3,ph:.85},tg=V(0,3,-3),td=tg.clone();let dg=null,ds=null,selId=null,hl=[];
+function setCam(){tg.lerp(td,.08);cam.position.set(tg.x+sp.r*Math.sin(sp.ph)*Math.sin(sp.th),tg.y+sp.r*Math.cos(sp.ph),tg.z+sp.r*Math.sin(sp.ph)*Math.cos(sp.th));cam.lookAt(tg)}
+R.domElement.onpointerdown=e=>{dg=ds=[e.clientX,e.clientY]};
+addEventListener('pointerup',e=>{if(ds&&Math.hypot(e.clientX-ds[0],e.clientY-ds[1])<5&&e.target==R.domElement)pick(e);dg=ds=null});
+addEventListener('pointermove',e=>{if(!dg)return;sp.th-=(e.clientX-dg[0])*.006;sp.ph=Math.max(.2,Math.min(1.5,sp.ph-(e.clientY-dg[1])*.006));dg=[e.clientX,e.clientY]});
+R.domElement.addEventListener('wheel',e=>{sp.r=Math.max(12,Math.min(55,sp.r+e.deltaY*.03));e.preventDefault()},{passive:false});
+const ray=new THREE.Raycaster();
+function pick(e){ray.setFromCamera({x:e.clientX/innerWidth*2-1,y:-e.clientY/innerHeight*2+1},cam);const h=ray.intersectObjects(pk,true)[0];if(!h)return;let o=h.object;while(o&&!o.userData.id)o=o.parent;if(o)sel(o)}
+function sel(g){hl.forEach(([m,c])=>m.emissive.setHex(c));hl=[];g.traverse(o=>{if(o.isMesh&&o.material.emissive&&o.material.emissiveIntensity!==.8){hl.push([o.material,o.material.emissive.getHex()]);o.material.emissive.setHex(0x1d4f6e)}});
+td.copy(g.userData.f);$('it').innerHTML=`<b>${g.userData.id=='wires'?'Wiring':g.userData.id=='esp'?'ESP32-CAM':g.userData.id=='lap'?'Laptop':g.userData.id=='pad'?'Scan area':g.userData.id=='ttl'?'TTL module':g.userData.id=='boost'?'5V boost converter':g.userData.id=='cap'?'470 uF capacitor':g.userData.id=='batt'?'Battery pack':g.userData.id=='bb'?'Breadboard':g.userData.id[0]=='b'?CL[+g.userData.id[1]]+' bin':'Servo '+(+g.userData.id[1]+1)}</b><br>${INFO[g.userData.id]}`}
+function fit(){const W=innerWidth,H=innerHeight;R.setSize(W,H);cam.aspect=W/H;cam.setViewOffset(W,H,W>700?Math.min(170,W*.21):0,0,W,H)}
+function qual(){const hi=$('q').value=='hi';R.setPixelRatio(hi?Math.min(devicePixelRatio,2):1);dl.shadow.mapSize.set(hi?2048:1024,hi?2048:1024);if(dl.shadow.map){dl.shadow.map.dispose();dl.shadow.map=null}fit()}
+addEventListener('resize',fit);
+// logic
+const a=[0,0,0,0],tgt=[0,0,0,0];let st='boot',tt=0,T=0,item=null,cur=null,t0=0,rec=[],cnt=[0,0,0,0],batt=4.1,bi=0,bp2=0,thanos=0;
+const log=m=>{const s=$('sm');s.textContent+=`[${T.toFixed(1)}s] ${m}\n`;s.scrollTop=1e9};
+const mx=()=>$('low').checked?.8:1.1,say=t=>$('res').textContent=t;
+function mk(k){let o;if(k==0)o=new THREE.Mesh(new THREE.SphereGeometry(.65,20,14),M(0xc0392b,{roughness:.35}));
+else if(k==1)o=new THREE.Mesh(new THREE.IcosahedronGeometry(.7,1),M(0xf2f2f2,{roughness:1}));
+else if(k==2)o=new THREE.Mesh(new THREE.CylinderGeometry(.45,.45,1,24),M(0xc9ced4,{metalness:.9,roughness:.25}));
+else{o=new THREE.Group();o.add(new THREE.Mesh(new THREE.CylinderGeometry(.35,.35,1.3,20),M(0x4aa3e8,{transparent:true,opacity:.75})));const c=new THREE.Mesh(new THREE.CylinderGeometry(.15,.15,.3,12),M(0xffffff));c.position.y=.8;o.add(c)}
+o.traverse(m=>{if(m.isMesh)m.castShadow=true});return o}
+function spawn(){const k=Math.floor(Math.random()*4);item=mk(k);item.position.set(0,5,6);scene.add(item);
+let p=k;if(Math.random()*100<+$('mis').value)p=(k+1+Math.floor(Math.random()*3))%4;
+cur={k,p,conf:p==k?85+Math.random()*13:52+Math.random()*27,id:rec.length+1};st='drop';tt=0;log(`NEW OBJECT #${cur.id} on scan area`);say('Object placed on scan area')}
+function fin(res){rec.push([cur.id,CL[cur.k],CL[cur.p],cur.conf.toFixed(1),Math.round(cur.ms||0),res]);
+if(res=='ok'||res=='wrong')cnt[cur.p]++;batt=Math.max(3.4,batt-.01);if(item){scene.remove(item);item=null}stats()}
+function stats(){const n=rec.length,c=rec.filter(r=>r[1]==r[2]).length,s=rec.filter(r=>r[5]=='ok').length,f=rec.filter(r=>'jam timeout full'.includes(r[5])).length;
+const ms=n?rec.reduce((x,r)=>x+ +r[4],0)/n:0,lw=$('low').checked,bv=lw?3.2:batt;
+$('st').innerHTML=`<tr><td>Items handled<td>${n}<tr><td>Recognition accuracy<td>${n?(c/n*100).toFixed(0):'-'}%<tr><td>Segregation efficiency<td>${n?(s/n*100).toFixed(0):'-'}%<tr><td>Avg processing time<td>${n?(ms/1e3).toFixed(2):'-'} s<tr><td>Faults (jam, timeout, full)<td>${f}<tr><td>Battery / 5V rail<td>${bv.toFixed(2)} V / ${lw?'4.60':'5.00'} V`;
+$('bins').innerHTML=CL.map((x,i)=>`<div class="b"><i>${x}</i><u><s style="width:${Math.min(100,cnt[i]/FULL*100)}%;background:${cnt[i]>=FULL?'#ef4444':HX[i]}"></s></u><span>${cnt[i]>=FULL?'FULL':cnt[i]+'/'+FULL}</span></div>`).join('')}
+function press(){if(st!='wait')return;thanos=Math.random()<.15;hs.visible=!thanos;hg.visible=thanos;H.visible=true;st='hand';tt=0;log('HAND: placing item in bin '+(cur.p+1)+(thanos?' [gauntlet]':''));say('Hand is placing the item...')}
+function handAnim(t){const A=V(0,3,14),B=V(0,2.2,6),C=V(BX[cur.p],4.6,.5);let p;
+if(t<.8)p=A.clone().lerp(B,ease(t/.8));else if(t<1.15)p=B;else if(t<2.15){const u=ease(t-1.15);p=B.clone().lerp(C,u);p.y+=1.5*Math.sin(u*Math.PI)}else if(t<2.45)p=C;else p=C.clone().lerp(A,ease((t-2.45)/.8));
+H.position.copy(p);
+if(item){if(t>=.8&&t<2.45)item.position.set(p.x,p.y-.9,p.z-.1);else if(t>=2.45){const d=t-2.45;item.position.set(C.x,C.y-.9-40*d*d,C.z-.1);if(item.position.y<3.2)item.visible=false}}}
+function step(dt){for(let i=0;i<4;i++){const g=tgt[i]?mx():0;if(+$('stk').value!=i+1){const s=($('low').checked?1.1:4.5)*dt;a[i]+=Math.max(-s,Math.min(s,g-a[i]))}piv[i].rotation.x=-a[i]}
+tt+=dt;led.material.emissiveIntensity=st=='scan'?2:0;ring.material.emissiveIntensity=st=='scan'?1.5:.15;
+if(st=='boot'){const i=bi;if(!bp2){tgt[i]=1;if(a[i]>.7||tt>1.8){if(a[i]<=.7)log(`FAULT: servo ${i+1} no response`);tgt[i]=0;bp2=1;tt=0}}
+else if(a[i]<.05||tt>1.8){log(`SELFTEST servo ${i+1} (GPIO${PIN[i]}) done`);bp2=0;bi++;tt=0;if(bi>3){st='idle';say('Ready. Press Randomize.');log('Self-test done. Waiting for object')}}}
+else if(st=='idle'){if($('auto').checked&&tt>1.2)spawn()}
+else if(st=='drop'){item.position.y=Math.max(.7,5-tt*tt*40);if(tt>.55){st='scan';tt=0;t0=T;log('CAM: flash ON, frame captured, running model');say('Scanning...')}}
+else if(st=='scan'){if(tt>1){log(`DETECT: ${CL[cur.p].toLowerCase()} (${(cur.conf/100).toFixed(2)}) -> SERVO ${cur.p+1}`);
+if(cnt[cur.p]>=FULL){log(`BIN FULL: servo ${cur.p+1} locked. Empty the ${CL[cur.p]} bin`);say('Bin full. Empty it first.');cur.ms=0;fin('full');st='idle';tt=0}
+else{tgt[cur.p]=1;st='open';tt=0}}}
+else if(st=='open'){if(a[cur.p]>.7){cur.ms=(T-t0)*1e3;log(`SERVO ${cur.p+1} OPEN OK (${Math.round(cur.ms)} ms). Waiting for hand`);st='wait';tt=0;say('Lid open. Press "Put in bin (hand)".')}
+else if(tt>2){log(`ERROR: SERVO ${cur.p+1} not responding`);tgt[cur.p]=0;cur.ms=(T-t0)*1e3;fin('jam');say('Servo jam. Check the fault.');st='close';tt=0}}
+else if(st=='wait'){if($('auto').checked&&tt>1.2)press();else if(tt>12){log('TIMEOUT: no drop detected, closing lid');tgt[cur.p]=0;fin('timeout');say('No drop. Lid closing.');st='close';tt=0}}
+else if(st=='hand'){handAnim(tt);if(tt>3.3){H.visible=false;const ok=cur.k==cur.p;log(`SORTED: ${CL[cur.k]} into ${CL[cur.p]} bin ${ok?'OK':'WRONG'}`);fin(ok?'ok':'wrong');tgt[cur.p]=0;st='close';tt=0}}
+else if(st=='close'){if(a[cur.p]<.05||tt>2){log(`SERVO ${cur.p+1} closed, detached. Waiting for next object`);say('Waiting for next object.');st='idle';tt=0}}
+const en=(id,v)=>{const e=$(id);if(e.disabled!=v)e.disabled=v};en('go',st!='idle');en('put',st!='wait')}
+function scr(){const W=800,Hh=600;og.clearRect(0,0,W,Hh);og.textBaseline='middle';og.fillStyle='rgba(8,14,20,.8)';og.fillRect(0,0,W,46);og.fillStyle='#fff';og.font='bold 24px system-ui';og.textAlign='left';og.fillText('EcoEye Scan',16,24);
+og.textAlign='right';og.fillStyle='#ff5a5a';og.fillText('\u25CF LIVE  ESP32-CAM',W-16,24);og.textAlign='left';
+let l1='Waiting for an object...',l2='Camera ready';
+if(item&&item.visible&&(st=='drop'||st=='scan'||st=='open'||st=='wait')){const p=item.position.clone().project(cam2),x=(p.x*.5+.5)*W,y=(-p.y*.5+.5)*Hh,sc=st=='scan'||st=='drop',c=sc?'#9aa5b1':HX[cur.p];
+og.strokeStyle=c;og.lineWidth=4;og.strokeRect(x-95,y-95,190,190);og.fillStyle=c;og.fillRect(x-95,y-125,sc?190:150,30);og.fillStyle='#000';og.font='bold 20px system-ui';
+og.fillText(sc?`detecting ${Math.round(Math.min(1,tt)*cur.conf*.7)}%`:`${CL[cur.p]} ${cur.conf.toFixed(0)}%`,x-88,y-110);
+l1=sc?'Scanning...':`Class: ${CL[cur.p]}  Confidence: ${cur.conf.toFixed(1)}%`;l2=sc?'Flash LED on':`Bin ${cur.p+1} (GPIO${PIN[cur.p]}) open  |  ${st=='wait'?'waiting for hand':'opening lid'}`}
+else if(st=='hand'){l1='Item being placed in bin';l2=`Bin ${cur.p+1} open`}else if(st=='boot'){l1='Servo self-test';l2='Checking 4 lids'}
+og.fillStyle='rgba(8,14,20,.8)';og.fillRect(0,Hh-96,W,96);og.fillStyle='#fff';og.font='bold 26px system-ui';og.fillText(l1,18,Hh-62);og.fillStyle='#9fb0c0';og.font='22px system-ui';og.fillText(l2,18,Hh-26);ot.needsUpdate=true}
+function draw(){lg.visible=scrM.visible=so.visible=false;R.setRenderTarget(rt);R.render(scene,cam2);R.setRenderTarget(null);lg.visible=scrM.visible=so.visible=true;scr();R.render(scene,cam)}
+let last=performance.now();
+function loop(n){requestAnimationFrame(loop);const dt=Math.min((n-last)/1e3,.05);last=n;T+=dt;step(dt);setCam();draw()}
+// ui
+$('go').onclick=()=>{if(st=='idle')spawn()};$('put').onclick=press;$('mis').oninput=e=>$('mv').textContent=e.target.value+'%';
+$('cov').onchange=e=>cover.visible=e.target.checked;$('q').onchange=qual;
+$('low').onchange=e=>{log(e.target.checked?'FAULT: battery 3.2 V, servo torque weak':'Battery restored');stats()};
+$('stk').onchange=e=>log(+e.target.value?`FAULT: servo ${e.target.value} stuck`:'Servo fault cleared');
+$('rs').onclick=()=>{rec=[];cnt=[0,0,0,0];batt=4.1;$('sm').textContent='';stats();log('Bins emptied, stats reset')};
+$('csv').onclick=()=>{const t='id,true,predicted,confidence,time_ms,result\n'+rec.map(r=>r.join(',')).join('\n'),l=document.createElement('a');l.href=URL.createObjectURL(new Blob([t],{type:'text/csv'}));l.download='ecoeye_results.csv';l.click()};
+fit();qual();stats();log('EcoEye Scan boot OK. ESP32-CAM ready, 4 servos attached');loop(last);
+</script></body></html>
